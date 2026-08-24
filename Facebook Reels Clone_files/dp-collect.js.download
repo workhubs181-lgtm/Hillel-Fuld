@@ -1,0 +1,155 @@
+// ==============================================
+// DATAPUBLYTICS TRACKING SCRIPT (ad-blocker-resistant version)
+// Website k <head> mein paste hoti hai. Cookieless hai.
+//
+// NOTE: Ye file /tracker/analytics.js ka hi copy hai, sirf naam aur API-path
+// alag hai - "analytics"/"track" jaisay lafz kai ad-blocker filter-lists
+// (EasyList/EasyPrivacy) mein automatically block ho jate hain. Ye naya,
+// neutral-naam wala version genuine visitors ko galti se blocked hone se
+// bachata hai. Purana /tracker/analytics.js bhi hamesha ki tarah chalta
+// rahega (jo customers pehle se laga chuke hain, unki site na tootey) -
+// bas NAYE customers ko ab yehi (naya) diya jata hai.
+// ==============================================
+(function () {
+    // Hamesha DataPublytics ka apna server - kisi bhi website pe reliable chalega
+    const API_BASE = 'https://datapublytics.com';
+
+    const TRACKING_ID = document.currentScript.getAttribute('data-tracking-id');
+    if (!TRACKING_ID) { console.warn('DataPublytics: data-tracking-id is missing'); return; }
+
+    // Agar site owner ne "root domain" set kiya hai (jaise "example.com"), to hum
+    // localStorage (jo har subdomain pe alag hoti hai) ki bajaye ek first-party
+    // cookie use karte hain jo POORE root domain pe scoped hoti hai (".example.com")
+    // - is se www.example.com aur shop.example.com jaisi subdomains k beech visitor
+    // ki identity SHARE hoti hai (GA4 k "cross-domain linking" jaisa), warna dono
+    // ko 2 alag visitors/sessions samjha jata.
+    //
+    // Agar root domain set NAHI hai (default), kuch nahi badalta - purana
+    // localStorage-based (cookieless) tareeqa bilkul waisa hi chalta hai.
+    const ROOT_DOMAIN = document.currentScript.getAttribute('data-root-domain');
+
+    function getCookie(name) {
+        const match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
+        return match ? decodeURIComponent(match[2]) : null;
+    }
+    function setCookie(name, value, days) {
+        const expires = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toUTCString();
+        // domain=.example.com - shuru ka "." zaroori hai taake saari subdomains
+        // (www, shop, blog, waghera) isay share kar sakein
+        document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/; domain=.${ROOT_DOMAIN}; SameSite=Lax`;
+    }
+    function storageGet(key) {
+        return ROOT_DOMAIN ? getCookie(key) : localStorage.getItem(key);
+    }
+    function storageSet(key, value) {
+        if (ROOT_DOMAIN) setCookie(key, value, 400); // 400 din - browsers ki max cookie age limit
+        else localStorage.setItem(key, value);
+    }
+
+    // Visitor ID - hamesha k liye same rehta hai (localStorage mein, ya cookie
+    // agar cross-subdomain tracking ON hai)
+    function getVisitorId() {
+        let id = storageGet('dp_visitor_uid');
+        if (!id) {
+            id = 'v_' + Date.now() + '_' + Math.random().toString(36).substring(2, 12);
+            storageSet('dp_visitor_uid', id);
+        }
+        return id;
+    }
+
+    // Session ID - 30 minute inactivity k baad naya ban jata hai
+    function getSessionId() {
+        let sessionId = storageGet('dp_session_uid');
+        let sessionTime = storageGet('dp_session_time');
+        const now = Date.now();
+
+        if (!sessionId || !sessionTime || (now - parseInt(sessionTime)) > 30 * 60 * 1000) {
+            sessionId = 's_' + now + '_' + Math.random().toString(36).substring(2, 10);
+            storageSet('dp_session_uid', sessionId);
+        }
+        storageSet('dp_session_time', now.toString());
+        return sessionId;
+    }
+
+    function getUtmParams() {
+        const params = new URLSearchParams(window.location.search);
+        const utm = {};
+        ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'].forEach(key => {
+            if (params.get(key)) utm[key] = params.get(key);
+        });
+        return utm;
+    }
+
+    function sendBeacon(endpoint, payload) {
+        const url = `${API_BASE}/api/collect/${endpoint}`;
+        if (navigator.sendBeacon) {
+            // "text/plain" jaan-boojh kar use kiya hai (na ke "application/json") -
+            // CORS ka rule hai ke "application/json" content-type wali request
+            // "non-simple" mani jati hai, jis se browser HAMESHA pehle ek
+            // preflight (OPTIONS) request bhejta hai - kuch mobile/in-app
+            // browsers is preflight ko theek se handle nahi karte. "text/plain"
+            // ek "simple" content-type hai - preflight ki zarurat hi nahi
+            // parti, seedha request chali jati hai (bade analytics-tools bhi
+            // isi wajah se yehi tareeqa use karte hain)
+            navigator.sendBeacon(url, new Blob([JSON.stringify(payload)], { type: 'text/plain' }));
+        } else {
+            fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), keepalive: true }).catch(() => {});
+        }
+    }
+
+    // Pageview bhejo
+    function trackPageview() {
+        sendBeacon('pageview', {
+            tracking_id: TRACKING_ID,
+            session_uid: getSessionId(),
+            visitor_uid: getVisitorId(),
+            url: window.location.href,
+            page_title: document.title,
+            referrer: document.referrer || null,
+            utm: getUtmParams()
+        });
+    }
+
+    // BUG FIX: Chrome jaise browsers kabhi kabhi links ko "speculatively"
+    // prefetch/prerender kar dete hain (user ke asal click karne se PEHLE) -
+    // taake click hone par page turant khul jaye. Agar is dauran page ki JS
+    // chal jaye, tracking script bhi chal jata - matlab ek FAKE pageview/session
+    // ban jati thi jise user ne kabhi dekha hi nahi. GA4 isse guard karta hai,
+    // hum bhi ab karte hain: agar page abhi "prerendering" state mein hai, to
+    // track NAHI karte - jab tak user asal mein us page ko dekh na le (tab
+    // "prerenderingchange" event fire hota hai, us waqt track karte hain)
+    if (document.prerendering) {
+        document.addEventListener('prerenderingchange', trackPageview, { once: true });
+    } else if (document.visibilityState === 'prerender') {
+        // Purane browsers (jo naya Prerendering API support nahi karte) k liye fallback
+        document.addEventListener('visibilitychange', function onVisible() {
+            if (document.visibilityState === 'visible') {
+                document.removeEventListener('visibilitychange', onVisible);
+                trackPageview();
+            }
+        });
+    } else {
+        trackPageview();
+    }
+
+    // Har 10 second baad heartbeat bhejo (active users count turant update hone k liye)
+    setInterval(() => {
+        sendBeacon('heartbeat', {
+            tracking_id: TRACKING_ID,
+            session_uid: getSessionId()
+        });
+    }, 10000);
+
+    // Custom events k liye global function
+    // Example: window.dpTrack('signup_click', { button: 'header' })
+    window.dpTrack = function (eventName, props) {
+        sendBeacon('event', {
+            tracking_id: TRACKING_ID,
+            session_uid: getSessionId(),
+            event_name: eventName,
+            page_url: window.location.href,
+            props: props || {}
+        });
+    };
+
+})();
